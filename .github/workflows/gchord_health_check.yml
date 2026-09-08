@@ -1,0 +1,134 @@
+name: gchord_health_check
+
+on:
+  schedule:
+    - cron: '*/30 * * * *'
+  workflow_dispatch:
+
+# Restrict default GITHUB_TOKEN permissions for public repo security
+permissions:
+  contents: read
+
+# Prevent overlapping runs if previous run takes longer
+concurrency:
+  group: gchord-health-check
+  cancel-in-progress: true
+
+jobs:
+  health_check:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Perform Health Check
+        env:
+          HEALTH_URL: ${{ secrets.URL || secrets.GCHORD_HEALTH_URL || secrets.HEALTH_URL }}
+          APP_ID: ${{ secrets.APP_ID || secrets.GCHORD_APP_ID }}
+          SECRET_KEY: ${{ secrets.SECRET_KEY || secrets.GCHORD_SECRET_KEY }}
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN || secrets.BOT_TOKEN }}
+          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHANNEL_ID || secrets.TELEGRAM_CHAT_ID || secrets.CHANNEL_ID || secrets.CHAT_ID }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: |
+          # Guard: ensure required secrets are configured
+          if [ -z "$HEALTH_URL" ] || [ -z "$APP_ID" ] || [ -z "$SECRET_KEY" ]; then
+            echo "::error::Missing required secrets (HEALTH_URL, APP_ID, or SECRET_KEY). Please set them under Repository Secrets."
+            exit 1
+          fi
+
+          echo "Initiating health check..."
+          TIMESTAMP=$(date -u +"%Y-%m-%d %H:%M:%S UTC")
+
+          # Perform request
+          HTTP_RESPONSE=$(curl --location --silent --show-error \
+            --write-out "\nHTTP_STATUS:%{http_code}" \
+            "$HEALTH_URL" \
+            --header "app-id: $APP_ID" \
+            --header "secret-key: $SECRET_KEY")
+
+          # Separate HTTP status code from body
+          HTTP_STATUS=$(echo "$HTTP_RESPONSE" | tr -d '\r' | sed -n -e 's/^HTTP_STATUS://p')
+          BODY=$(echo "$HTTP_RESPONSE" | sed -e '/^HTTP_STATUS:/d')
+
+          echo "HTTP Status: $HTTP_STATUS"
+          echo "Response Body:"
+          echo "$BODY" | jq . 2>/dev/null || echo "$BODY"
+
+          UNHEALTHY=false
+          TELEGRAM_MSG=""
+
+          format_status() {
+            if [ "$1" = "true" ]; then
+              echo "✅ OK"
+            else
+              echo "❌ FAILED"
+            fi
+          }
+
+          # Validate if response is valid JSON
+          if ! echo "$BODY" | jq -e . >/dev/null 2>&1; then
+            UNHEALTHY=true
+            echo "::error::Endpoint returned invalid JSON or failed to respond."
+            BODY_PREVIEW=$(echo "$BODY" | head -c 300)
+            TELEGRAM_MSG=$(printf "%b" \
+              "🚨 <b>GChord Health Alert</b> 🚨\n\n" \
+              "<b>Status:</b> ❌ Unreachable / Invalid Response\n" \
+              "<b>Endpoint:</b> <code>${HEALTH_URL}</code>\n" \
+              "<b>HTTP Status:</b> <code>${HTTP_STATUS}</code>\n" \
+              "<b>Time:</b> <code>${TIMESTAMP}</code>\n\n" \
+              "<b>Error:</b> Endpoint returned non-JSON response or failed to respond.\n" \
+              "<b>Response Preview:</b>\n" \
+              "<pre>${BODY_PREVIEW}</pre>\n\n" \
+              "<a href=\"${RUN_URL}\">View GitHub Action Run</a>")
+          else
+            # Extract component statuses from JSON
+            STATUS_CODE=$(echo "$BODY" | jq -r '.status // empty')
+            CACHE_STORE=$(echo "$BODY" | jq -r '.data.CacheStore // false')
+            DATA_STORE=$(echo "$BODY" | jq -r '.data.DataStore // false')
+            LYRICS_STORE=$(echo "$BODY" | jq -r '.data.LyricsDataStore // false')
+            GSR_READY=$(echo "$BODY" | jq -r '.data.GsrHealth.Ready // false')
+            GSR_CACHE=$(echo "$BODY" | jq -r '.data.GsrHealth.CacheStoreConnected // false')
+            GSR_DATA=$(echo "$BODY" | jq -r '.data.GsrHealth.DataStoreConnected // false')
+
+            # Check if any check failed
+            if [ "$HTTP_STATUS" -ne 200 ] || [ "$STATUS_CODE" != "200" ] || \
+               [ "$CACHE_STORE" != "true" ] || [ "$DATA_STORE" != "true" ] || \
+               [ "$LYRICS_STORE" != "true" ] || [ "$GSR_READY" != "true" ] || \
+               [ "$GSR_CACHE" != "true" ] || [ "$GSR_DATA" != "true" ]; then
+              UNHEALTHY=true
+              echo "::error::One or more GChord services reported an unhealthy state."
+              TELEGRAM_MSG=$(printf "%b" \
+                "🚨 <b>GChord Health Alert</b> 🚨\n\n" \
+                "<b>Status:</b> ❌ Unhealthy\n" \
+                "<b>Endpoint:</b> <code>${HEALTH_URL}</code>\n" \
+                "<b>HTTP Status:</b> <code>${HTTP_STATUS}</code>\n" \
+                "<b>Time:</b> <code>${TIMESTAMP}</code>\n\n" \
+                "<b>Component Status:</b>\n" \
+                "• CacheStore: $(format_status "$CACHE_STORE")\n" \
+                "• DataStore: $(format_status "$DATA_STORE")\n" \
+                "• LyricsDataStore: $(format_status "$LYRICS_STORE")\n" \
+                "• Gsr Ready: $(format_status "$GSR_READY")\n" \
+                "• Gsr CacheStore: $(format_status "$GSR_CACHE")\n" \
+                "• Gsr DataStore: $(format_status "$GSR_DATA")\n\n" \
+                "<a href=\"${RUN_URL}\">View GitHub Action Run</a>")
+            fi
+          fi
+
+          # Process unhealthy state
+          if [ "$UNHEALTHY" = true ]; then
+            if [ -n "$TELEGRAM_BOT_TOKEN" ] && [ -n "$TELEGRAM_CHAT_ID" ]; then
+              echo "Sending alert to Telegram..."
+              TELEGRAM_HTTP_CODE=$(curl -s -o /dev/null -w "%{http_code}" -X POST "https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendMessage" \
+                -d "chat_id=${TELEGRAM_CHAT_ID}" \
+                -d "parse_mode=HTML" \
+                --data-urlencode "text=${TELEGRAM_MSG}")
+
+              if [ "$TELEGRAM_HTTP_CODE" -eq 200 ]; then
+                echo "Telegram alert dispatched successfully."
+              else
+                echo "::warning::Failed to dispatch Telegram alert (HTTP $TELEGRAM_HTTP_CODE)."
+              fi
+            else
+              echo "Telegram notification skipped: TELEGRAM_BOT_TOKEN or TELEGRAM_CHAT_ID not configured in secrets."
+            fi
+            exit 1
+          fi
+
+          echo "All services healthy!"
