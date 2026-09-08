@@ -2,7 +2,7 @@ name: gchord_health_check
 
 on:
   schedule:
-    - cron: '*/30 * * * *'
+    - cron: '15,45 * * * *'
   workflow_dispatch:
 
 # Restrict default GITHUB_TOKEN permissions for public repo security
