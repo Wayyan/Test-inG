@@ -84,12 +84,18 @@ jobs:
             GSR_READY=$(echo "$BODY" | jq -r '.data.GsrHealth.Ready // false')
             GSR_CACHE=$(echo "$BODY" | jq -r '.data.GsrHealth.CacheStoreConnected // false')
             GSR_DATA=$(echo "$BODY" | jq -r '.data.GsrHealth.DataStoreConnected // false')
+            COLLECTION_DATA=$(echo "$BODY" | jq -r '(.data.CollectionServiceHealth.DataStore // .data.CollectionService.DataStore) // false')
+            POPULAR_DATA=$(echo "$BODY" | jq -r '(.data.PopularService.DataStore // .data.PopularServiceHealth.DataStore) // false')
+            MAILER_DATA=$(echo "$BODY" | jq -r '(.data.MailerServiceHealth.DataStore // .data.MailerService.DataStore) // false')
+            SONG_REQ_DATA=$(echo "$BODY" | jq -r '(.data.SongReqServiceHealth.DataStore // .data.SongReqService.DataStore) // false')
 
             # Check if any check failed
             if [ "$HTTP_STATUS" -ne 200 ] || [ "$STATUS_CODE" != "200" ] || \
                [ "$CACHE_STORE" != "true" ] || [ "$DATA_STORE" != "true" ] || \
                [ "$LYRICS_STORE" != "true" ] || [ "$GSR_READY" != "true" ] || \
-               [ "$GSR_CACHE" != "true" ] || [ "$GSR_DATA" != "true" ]; then
+               [ "$GSR_CACHE" != "true" ] || [ "$GSR_DATA" != "true" ] || \
+               [ "$COLLECTION_DATA" != "true" ] || [ "$POPULAR_DATA" != "true" ] || \
+               [ "$MAILER_DATA" != "true" ] || [ "$SONG_REQ_DATA" != "true" ]; then
               UNHEALTHY=true
               echo "::error::One or more GChord services reported an unhealthy state."
               TELEGRAM_MSG=$(printf "%b" \
@@ -104,7 +110,11 @@ jobs:
                 "• LyricsDataStore: $(format_status "$LYRICS_STORE")\n" \
                 "• Gsr Ready: $(format_status "$GSR_READY")\n" \
                 "• Gsr CacheStore: $(format_status "$GSR_CACHE")\n" \
-                "• Gsr DataStore: $(format_status "$GSR_DATA")\n\n" \
+                "• Gsr DataStore: $(format_status "$GSR_DATA")\n" \
+                "• CollectionService DataStore: $(format_status "$COLLECTION_DATA")\n" \
+                "• PopularService DataStore: $(format_status "$POPULAR_DATA")\n" \
+                "• MailerService DataStore: $(format_status "$MAILER_DATA")\n" \
+                "• SongReqService DataStore: $(format_status "$SONG_REQ_DATA")\n\n" \
                 "<a href=\"${RUN_URL}\">View GitHub Action Run</a>")
             fi
           fi
